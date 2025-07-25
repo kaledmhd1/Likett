@@ -91,7 +91,7 @@ def encrypt_api(plain_text):
     return cipher_text.hex()
 
 def FOX_RequestAddingFriend(token, target_id):
-    url = "https://panel-friend-bot.vercel.app/request?token={token}&uid={uid}"
+    url = f"https://panel-friend-bot.vercel.app/request?token={token}&uid={target_id}"
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "X-GA": "v1 1",
@@ -106,10 +106,12 @@ def FOX_RequestAddingFriend(token, target_id):
         "Accept": "/"
     }
     data = bytes.fromhex(encrypt_api("08" + Encrypt_ID(target_id) + "1801"))
-    response = requests.post(url, headers=headers, data=data, verify=False)
-    if response.status_code == 200:
-        return True
-    else:
+    try:
+        response = requests.post(url, headers=headers, data=data, timeout=10, verify=False)
+        print(f"[DEBUG] Panel Response {response.status_code}: {response.text}")
+        return response.status_code == 200
+    except Exception as e:
+        print(f"[ERROR] FOX_RequestAddingFriend failed: {e}")
         return False
 
 def send_friend_request_for_token(uid, token, target_id):
