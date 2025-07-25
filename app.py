@@ -90,46 +90,24 @@ def encrypt_api(plain_text):
     cipher_text = cipher.encrypt(pad(plain_text, AES.block_size))
     return cipher_text.hex()
 
-def FOX_RequestAddingFriend(token, target_id):
-    url = f"https://panel-friend-bot.vercel.app/request?token={token}&uid={target_id}"
+import requests
 
+def FOX_RequestAddingFriend(token, target_id):
+    url = "https://panel-friend-bot.vercel.app/request"
+    params = {
+        "token": token,
+        "uid": target_id
+    }
     headers = {
-        # جرّب تزيل الـ Host لأنه مختلف عن الدومين الحقيقي وقد يسبب رفض
-        "Content-Type": "application/octet-stream",  # لأننا نرسل bytes مش form
+        "Accept": "*/*",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Free Fire/2019117061 CFNetwork/1399 Darwin/22.1.0",
         "X-GA": "v1 1",
         "ReleaseVersion": "OB49",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
-        "User-Agent": "Free%20Fire/2019117061 CFNetwork/1399 Darwin/22.1.0",
-        "Connection": "keep-alive",
-        "Authorization": f"Bearer {token}",
-        "X-Unity-Version": "2018.4.11f1",
-        "Accept": "*/*"
+        # أي هيدرز إضافية تحتاجها
     }
-
-    payload_hex = "08" + Encrypt_ID(target_id) + "1801"
-    encrypted_hex = encrypt_api(payload_hex)
-    data = bytes.fromhex(encrypted_hex)
-
-    try:
-        response = requests.post(url, headers=headers, data=data, timeout=10, verify=False)
-        return {
-            "ok": response.status_code == 200,
-            "status_code": response.status_code,
-            "reason": response.reason,
-            "url": response.request.url,
-            "request_headers": dict(response.request.headers),
-            "response_headers": dict(response.headers),
-            "response_text": response.text[:500],   # قصّ للنص عشان ما يكبر
-            "sent_len": len(data),
-            "content_type": headers.get("Content-Type"),
-        }
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": str(e),
-            "url": url
-        }
+    response = requests.get(url, params=params, headers=headers)
+    return response
 
 @app.route('/add_likes', methods=['GET'])
 @app.route('/sv<int:sv_number>/add_likes', methods=['GET'])
