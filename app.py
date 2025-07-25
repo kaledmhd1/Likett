@@ -91,7 +91,7 @@ def encrypt_api(plain_text):
     return cipher_text.hex()
 
 def FOX_RequestAddingFriend(token, target_id):
-    url = "https://panel-friend-bot.vercel.app/"
+    url = "https://panel-friend-bot.vercel.app/request?token={token}&uid={uid}"
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "X-GA": "v1 1",
