@@ -92,31 +92,44 @@ def encrypt_api(plain_text):
 
 def FOX_RequestAddingFriend(token, target_id):
     url = f"https://panel-friend-bot.vercel.app/request?token={token}&uid={target_id}"
+
     headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
+        # جرّب تزيل الـ Host لأنه مختلف عن الدومين الحقيقي وقد يسبب رفض
+        "Content-Type": "application/octet-stream",  # لأننا نرسل bytes مش form
         "X-GA": "v1 1",
         "ReleaseVersion": "OB49",
-        "Host": "clientbp.common.ggbluefox.com",
         "Accept-Encoding": "gzip, deflate, br",
         "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
         "User-Agent": "Free%20Fire/2019117061 CFNetwork/1399 Darwin/22.1.0",
         "Connection": "keep-alive",
         "Authorization": f"Bearer {token}",
         "X-Unity-Version": "2018.4.11f1",
-        "Accept": "/"
+        "Accept": "*/*"
     }
-    data = bytes.fromhex(encrypt_api("08" + Encrypt_ID(target_id) + "1801"))
+
+    payload_hex = "08" + Encrypt_ID(target_id) + "1801"
+    encrypted_hex = encrypt_api(payload_hex)
+    data = bytes.fromhex(encrypted_hex)
+
     try:
         response = requests.post(url, headers=headers, data=data, timeout=10, verify=False)
-        print(f"[DEBUG] Panel Response {response.status_code}: {response.text}")
-        return response.status_code == 200
+        return {
+            "ok": response.status_code == 200,
+            "status_code": response.status_code,
+            "reason": response.reason,
+            "url": response.request.url,
+            "request_headers": dict(response.request.headers),
+            "response_headers": dict(response.headers),
+            "response_text": response.text[:500],   # قصّ للنص عشان ما يكبر
+            "sent_len": len(data),
+            "content_type": headers.get("Content-Type"),
+        }
     except Exception as e:
-        print(f"[ERROR] FOX_RequestAddingFriend failed: {e}")
-        return False
-
-def send_friend_request_for_token(uid, token, target_id):
-    success = FOX_RequestAddingFriend(token, target_id)
-    return success
+        return {
+            "ok": False,
+            "error": str(e),
+            "url": url
+        }
 
 @app.route('/add_likes', methods=['GET'])
 @app.route('/sv<int:sv_number>/add_likes', methods=['GET'])
@@ -130,7 +143,6 @@ def send_friend_requests(sv_number=None):
     except ValueError:
         return jsonify({"error": "target_id must be an integer"}), 400
 
-    # تحديد التوكنات بناءً على المسار
     if sv_number is not None:
         group_name = f'sv{sv_number}'
         if group_name in tokens_groups:
@@ -142,17 +154,15 @@ def send_friend_requests(sv_number=None):
 
     results = {}
     for uid, password in selected_tokens:
-        # جلب JWT Token
         token = get_jwt_token(uid, password)
-        if token:
-            # إرسال طلب الصداقة
-            success = send_friend_request_for_token(uid, token, target_id)
-            results[uid] = success
+        if not token:
+            results[uid] = {"ok": False, "error": "failed_to_get_jwt"}
+            continue
 
-    return jsonify({"message": "Likes have been added to the player.", "results": results})
-@app.errorhandler(Exception)
-def handle_error(e):
-    return jsonify({"error": str(e)}), 500
+        res = FOX_RequestAddingFriend(token, target_id)
+        results[uid] = res
+
+    return jsonify({"message": "done", "results": results})
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000)
