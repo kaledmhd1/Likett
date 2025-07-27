@@ -98,7 +98,7 @@ def FOX_RequestAddingFriend(token, target_id):
     url = "https://arifi-like-token.vercel.app/like"
     params = {
         "token": token,
-        "uid": target_id
+        "id": target_id
     }
     headers = {
         "Accept": "*/*",
