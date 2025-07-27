@@ -93,7 +93,7 @@ def encrypt_api(plain_text):
 import requests
 
 def FOX_RequestAddingFriend(token, target_id):
-    url = "url = "https://arifi-like-token.vercel.app/like"
+    url = "url = https://arifi-like-token.vercel.app/like"
     params = {
         "token": token,
         "uid": target_id
