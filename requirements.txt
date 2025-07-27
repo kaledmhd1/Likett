@@ -1,10 +1,4 @@
-Flask 
-requests
-protobuf
-protobuf_decoder
-pyjwt
-urllib3
-pycryptodome
-httpx
-pycryptodome
+fastapi
+uvicorn
 gunicorn
+httpx
