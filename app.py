@@ -1,48 +1,73 @@
+from flask import Flask, request, jsonify
+import requests
+import threading
+import time
 import json
 import os
-import time
-import threading
-import requests
-from flask import Flask, request, jsonify
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
 import urllib3
-
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
-ACCOUNTS_FILE = os.getenv('ACCOUNTS_FILE', 'accs.txt')
-REFRESH_INTERVAL = int(os.getenv('REFRESH_INTERVAL', '3600'))  # 1 ساعة
+ACCS_FILE = "accs.txt"  # الملف الخارجي الذي يحتوي على اليوزرات والباسووردات
 
-# الحالة المشتركة
-jwt_tokens_current = {}          # النسخة الجاهزة للاستعمال
-last_refresh_at = 0              # آخر وقت *ناجح* للتحديث
-last_refresh_attempt_at = 0      # آخر محاولة تحديث (قد تفشل)
-is_refreshing = False            # فلاغ لمعرفة إن كان هناك تحديث جارٍ
-tokens_lock = threading.Lock()
+def load_tokens():
+    """تحميل التوكنات من الملف accs.txt (على شكل dict: {uid: password})."""
+    if os.path.exists(ACCS_FILE):
+        with open(ACCS_FILE, 'r', encoding='utf-8') as f:
+            try:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+            except Exception as e:
+                print(f"[ERROR] Failed to load tokens from {ACCS_FILE}: {e}")
+    return {}
 
-# ---------------- Utilities ----------------
-def load_accounts(path=ACCOUNTS_FILE):
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data if isinstance(data, dict) else {}
-    except Exception as e:
-        print(f"[ERROR] load_accounts: {e}")
-        return {}
+tokens1 = load_tokens()
+tokens_groups = {
+    'sv1': tokens1,
+}
+
+jwt_tokens = {}  # نخزن هنا التوكنات الجاهزة
+jwt_tokens_lock = threading.Lock()
 
 def get_jwt_token(uid, password):
+    """يحصل على التوكن ويقوم بتسجيله في jwt_tokens إذا نجح."""
     url = f"https://jwt-gen-api-v2.onrender.com/token?uid={uid}&password={password}"
     try:
-        r = requests.get(url, timeout=15, verify=False)
-        if r.status_code == 200:
-            data = r.json()
+        response = requests.get(url, timeout=10)
+        print(f"[DEBUG] JWT API Response [{uid}]: {response.status_code} -> {response.text}")
+        if response.status_code == 200:
+            data = response.json()
             if data.get('status') in ('success', 'live'):
                 token = data.get('token')
-                print(f"[JWT] UID: {uid} - TOKEN: {token}")
+                with jwt_tokens_lock:
+                    jwt_tokens[uid] = token
                 return token
+            else:
+                print(f"Failed to get JWT token for UID {uid}: status={data.get('status')}")
+        else:
+            print(f"Failed to get JWT token for UID {uid}: HTTP {response.status_code}")
     except Exception as e:
-        print(f"[ERROR] get_jwt_token({uid}): {e}")
+        print(f"Error getting JWT token for UID {uid}: {e}")
     return None
+
+def refresh_tokens():
+    """يقوم بجلب جميع التوكنات وتخزينها مرة واحدة كل ساعة."""
+    while True:
+        for group_name, tokens in tokens_groups.items():
+            for uid, password in tokens.items():
+                token = get_jwt_token(uid, password)
+                if token:
+                    print(f"[INFO] Stored JWT for {uid}")
+        time.sleep(3600)
+
+# تشغيل خيط التحديث
+token_refresh_thread = threading.Thread(target=refresh_tokens)
+token_refresh_thread.daemon = True
+token_refresh_thread.start()
 
 def FOX_RequestAddingFriend(token, target_id):
     url = "https://arifi-like-token.vercel.app/like"
@@ -54,178 +79,150 @@ def FOX_RequestAddingFriend(token, target_id):
         "X-GA": "v1 1",
         "ReleaseVersion": "OB49",
     }
-    return requests.get(url, params=params, headers=headers, timeout=15, verify=False)
+    response = requests.get(url, params=params, headers=headers)
+    return response
 
-def get_player_info(uid):
-    url = f"https://razor-info.vercel.app/player-info?uid={uid}&region=me"
+def get_player_info(uid, region='me'):
+    """يرجع JSON من API اللاعب أو None في حال الفشل."""
+    url = f"https://razor-info.vercel.app/player-info?uid={uid}&region={region}"
     try:
-        r = requests.get(url, timeout=15, verify=False)
+        r = requests.get(url, timeout=10)
         if r.status_code == 200:
-            data = r.json()
-            if data.get("status") == "success":
-                player = data.get("player", {})
-                likes = player.get("likes", 0)
-                try:
-                    likes = int(likes)
-                except Exception:
-                    likes = 0
-                return {
-                    "name": player.get("nickname"),
-                    "uid": str(player.get("id") or uid),
-                    "likes": likes
-                }
+            return r.json()
+        print(f"[WARN] player-info API HTTP {r.status_code}: {r.text}")
     except Exception as e:
-        print(f"[ERROR] get_player_info({uid}): {e}")
+        print(f"[ERROR] get_player_info: {e}")
     return None
 
-# ---------------- Refresh logic ----------------
-def refresh_tokens():
+def extract_name_and_id(data):
     """
-    يبني new_tokens في Buffer منفصل.
-    لا يستبدل jwt_tokens_current إلا إذا كان لدينا توكنات صالحة.
+    حاول استخراج اسم اللاعب و الـID من الريسبونس.
+    عدّل هذه الدالة لو تعرف الهيكل الدقيق للـAPI.
     """
-    global jwt_tokens_current, last_refresh_at, last_refresh_attempt_at, is_refreshing
-    last_refresh_attempt_at = time.time()
-    is_refreshing = True
-    try:
-        accounts = load_accounts()
-        if not accounts:
-            print("[WARN] No accounts loaded!")
-            return 0
+    name = None
+    pid = None
 
-        new_tokens = {}
-        for uid, pwd in accounts.items():
-            tok = get_jwt_token(uid, pwd)
-            if tok:
-                new_tokens[uid] = tok
+    # محاولات عامة
+    if isinstance(data, dict):
+        name = data.get('name') or data.get('playerName') or data.get('nickname')
+        pid = data.get('id') or data.get('uid') or data.get('playerId')
+        # جرّب داخل حقول متداخلة
+        profile = data.get('profile') or data.get('data') or data.get('player')
+        if profile:
+            name = name or profile.get('name') or profile.get('playerName') or profile.get('nickname')
+            pid = pid or profile.get('id') or profile.get('uid') or profile.get('playerId')
 
-        if new_tokens:
-            with tokens_lock:
-                # **Atomic swap**: لا نفرغ القديمة، فقط نستبدل عندما تكون الجديدة جاهزة
-                jwt_tokens_current = new_tokens
-                last_refresh_at = time.time()
-            print(f"[INFO] Tokens refreshed. Count: {len(new_tokens)}")
-        else:
-            print("[WARN] refresh_tokens: got 0 valid tokens, keeping old ones.")
-        return len(new_tokens)
-    finally:
-        is_refreshing = False
+    return name, pid
 
-def refresh_tokens_background():
-    while True:
-        try:
-            print("[INFO] Background token refresh started.")
-            count = refresh_tokens()
-            print(f"[INFO] Background token refresh done. New valid tokens: {count} (current in use: {len(jwt_tokens_current)})")
-        except Exception as e:
-            print(f"[ERROR] refresh_tokens_background: {e}")
-        time.sleep(REFRESH_INTERVAL)
+def extract_likes(data):
+    """
+    حاول استخراج عدد اللايكات من الريسبونس.
+    عدّل هذه الدالة لو تعرف المفتاح الدقيق (ex: 'like', 'likes', 'favorite_count'...).
+    """
+    if not isinstance(data, dict):
+        return None
 
-# ---------------- Routes ----------------
-@app.route('/status', methods=['GET'])
-def status():
-    return jsonify({
-        "active_tokens": len(jwt_tokens_current),
-        "last_refresh_at": last_refresh_at,
-        "last_refresh_attempt_at": last_refresh_attempt_at,
-        "is_refreshing": is_refreshing
-    })
+    # احتمالات مباشرة
+    for key in ['likes', 'like', 'favorite_count', 'favourite_count', 'favs', 'hearts']:
+        if key in data and isinstance(data[key], (int, float)):
+            return int(data[key])
 
-@app.route('/refresh_now', methods=['POST'])
-def refresh_now():
-    count = refresh_tokens()
-    return jsonify({
-        "status": "refreshed",
-        "new_tokens": count,
-        "active_tokens": len(jwt_tokens_current),
-        "last_refresh_at": last_refresh_at,
-        "last_refresh_attempt_at": last_refresh_attempt_at,
-        "is_refreshing": is_refreshing
-    })
+    # جرّب داخل حقول متداخلة
+    for container_key in ['profile', 'data', 'player', 'stats']:
+        if container_key in data and isinstance(data[container_key], dict):
+            inner = data[container_key]
+            for key in ['likes', 'like', 'favorite_count', 'favourite_count', 'favs', 'hearts']:
+                if key in inner and isinstance(inner[key], (int, float)):
+                    return int(inner[key])
+
+    return None
 
 @app.route('/add_likes', methods=['GET'])
-def add_likes():
-    """
-    يستخدم دائمًا النسخة الجاهزة (jwt_tokens_current) حتى لو التحديث جارٍ.
-    """
+@app.route('/sv<int:sv_number>/add_likes', methods=['GET'])
+def send_friend_requests(sv_number=None):
     target_id = request.args.get('uid')
+    region = request.args.get('region', 'me')
+
     if not target_id:
-        return jsonify({"error": "target_id is required"}), 400
+        return jsonify({"error": "uid (target_id) is required"}), 400
+
     try:
         target_id_int = int(target_id)
     except ValueError:
-        return jsonify({"error": "target_id must be an integer"}), 400
+        return jsonify({"error": "uid must be an integer"}), 400
 
-    player_before = get_player_info(target_id_int)
-    if not player_before:
-        return jsonify({"error": "failed_to_fetch_player_before"}), 502
+    # احضر بيانات اللاعب قبل
+    before_info = get_player_info(target_id_int, region=region)
+    before_likes = extract_likes(before_info) if before_info else None
+    player_name, player_uid = extract_name_and_id(before_info or {})  # قد يرجع None
 
-    # Snapshot سريع بدون انتظار انتهاء التحديث
-    with tokens_lock:
-        active_tokens = dict(jwt_tokens_current)
-
-    if not active_tokens:
-        return jsonify({"error": "no_ready_tokens_yet"}), 503
+    # اختيار المجموعة
+    if sv_number is not None:
+        group_name = f'sv{sv_number}'
+        if group_name in tokens_groups:
+            selected_tokens = list(tokens_groups[group_name].items())
+        else:
+            return jsonify({"error": f"Invalid group: {group_name}"}), 400
+    else:
+        selected_tokens = list(tokens1.items())
 
     results = {}
-    success_calls = 0
-    for uid, token in active_tokens.items():
+    success_count = 0
+    for uid, password in selected_tokens:
+        with jwt_tokens_lock:
+            token = jwt_tokens.get(uid)  # استخدم التوكن المخزن
+        if not token:
+            # إذا لم يكن هناك توكن مسجل، نحاول جلبه وتسجيله
+            token = get_jwt_token(uid, password)
+            if not token:
+                results[uid] = {"ok": False, "error": "failed_to_get_jwt"}
+                continue
+
+        res = FOX_RequestAddingFriend(token, target_id_int)
         try:
-            res = FOX_RequestAddingFriend(token, target_id_int)
-            try:
-                content = res.json()
-            except Exception:
-                content = res.text
+            content = res.json()
+        except Exception:
+            content = res.text
 
-            is_ok = (res.status_code == 200)
-            if is_ok:
-                success_calls += 1
+        ok = res.status_code == 200
+        if ok:
+            success_count += 1
 
-            results[uid] = {
-                "ok": is_ok,
-                "status_code": res.status_code,
-                "content": content
-            }
-        except Exception as e:
-            results[uid] = {"ok": False, "error": str(e)}
+        results[uid] = {
+            "ok": ok,
+            "status_code": res.status_code,
+            "content": content
+        }
 
-    time.sleep(2)  # انتظار بسيط لتحديث العدّاد
+    # احضر بيانات اللاعب بعد
+    after_info = get_player_info(target_id_int, region=region)
+    after_likes = extract_likes(after_info) if after_info else None
 
-    player_after = get_player_info(target_id_int)
-    if not player_after:
-        return jsonify({"error": "failed_to_fetch_player_after"}), 502
+    added = None
+    if before_likes is not None and after_likes is not None:
+        added = after_likes - before_likes
 
-    likes_before = player_before["likes"]
-    likes_after = player_after["likes"]
-    likes_added = max(0, likes_after - likes_before)
-
-    return jsonify({
-        "message": "done",
+    response = {
         "player": {
-            "name": player_after["name"],
-            "uid": player_after["uid"],
-            "likes_before": likes_before,
-            "likes_after": likes_after,
-            "likes_added": likes_added
+            "name": player_name,
+            "id": player_uid or target_id_int,
+            "region": region
         },
-        "calls": {
-            "total_tokens": len(active_tokens),
-            "success_calls": success_calls
+        "likes": {
+            "before": before_likes,
+            "after": after_likes,
+            "added": added
         },
-        "last_refresh_at": last_refresh_at,
-        "last_refresh_attempt_at": last_refresh_attempt_at,
-        "is_refreshing": is_refreshing,
-        "results": results
-    })
+        "requests": {
+            "total_accounts": len(selected_tokens),
+            "success": success_count,
+            "failed": len(selected_tokens) - success_count,
+            "details": results
+        },
+        "message": "done"
+    }
 
-# ---------------- Boot ----------------
+    return jsonify(response)
+    
 if __name__ == "__main__":
-    # تحديث أولي (إن فشل، سنظل بدون توكنات لكن /add_likes لن يكسر النسخة الحالية لأنها فارغة أصلاً)
-    refresh_tokens()
-
-    # بدء الثريد الخلفي للتحديث كل ساعة
-    t = threading.Thread(target=refresh_tokens_background, daemon=True)
-    t.start()
-
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=5000)
