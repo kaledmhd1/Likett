@@ -3,6 +3,8 @@ import requests
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+import os
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 import urllib3
@@ -10,21 +12,30 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
-# التوكنات (UID: password)
-tokens1 = {
-    "3703466495": "799FAF292960B85062BCD462FD8116871F99B4A0505C09FFC6985AA1C32F31EA",
-    "3570958179": "C15AB416AB9FFF0D33F1C7950C75D950135A4DA42692D9433FF736BD5385F7B3",
-    "3571002164": "3D253727E7D7D4EC5CCC188398EABB9A94539579D7F7A041FDE5B268362AFF67",
-    "3571009024": "E8A128C48AC975A71A2F1B77A76D7332C94E6383719F8B56CF491A0DFAF4580F",
-    "3571068251": "7BE9F640DA9CF587165E7FC3E19D84D508434D854940C657DAC716681762DC58"
-}
+ACCS_FILE = "accs.txt"  # ملف التوكنات الخارجي
 
 tokens_groups = {
-    'sv1': tokens1,
+    'sv1': {}
 }
 
 jwt_tokens = {}
 jwt_tokens_lock = threading.Lock()
+
+def load_tokens():
+    """تحميل التوكنات من ملف accs.txt"""
+    if os.path.exists(ACCS_FILE):
+        try:
+            with open(ACCS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    tokens_groups['sv1'] = data
+                    print(f"[INFO] Loaded {len(data)} tokens from {ACCS_FILE}")
+                else:
+                    print(f"[WARN] {ACCS_FILE} content is not a dict")
+        except Exception as e:
+            print(f"[ERROR] Failed to load tokens from {ACCS_FILE}: {e}")
+    else:
+        print(f"[WARN] {ACCS_FILE} not found")
 
 def get_jwt_token(uid, password):
     url = f"https://jwt-gen-api-v2.onrender.com/token?uid={uid}&password={password}"
@@ -57,10 +68,6 @@ def refresh_tokens():
                     print(f"[WARN] Failed to refresh token for UID {uid}")
         print("[INFO] Token refresh done. Sleeping 1 hour...")
         time.sleep(3600)
-
-token_refresh_thread = threading.Thread(target=refresh_tokens)
-token_refresh_thread.daemon = True
-token_refresh_thread.start()
 
 def FOX_RequestAddingFriend(token, target_id):
     url = "https://arifi-like-token.vercel.app/like"
@@ -137,7 +144,7 @@ def send_friend_requests(sv_number=None):
         else:
             return jsonify({"error": f"Invalid group: {group_name}"}), 400
     else:
-        selected_tokens = list(tokens1.items())
+        selected_tokens = list(tokens_groups['sv1'].items())
 
     with jwt_tokens_lock:
         tokens_ready = {uid: jwt_tokens.get(uid) for uid, _ in selected_tokens}
@@ -163,6 +170,7 @@ def send_friend_requests(sv_number=None):
             "content": content
         }
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(send_like, item) for item in valid_tokens.items()]
         for future in as_completed(futures):
@@ -198,4 +206,8 @@ def send_friend_requests(sv_number=None):
     return jsonify(response)
 
 if __name__ == "__main__":
+    load_tokens()
+    token_refresh_thread = threading.Thread(target=refresh_tokens)
+    token_refresh_thread.daemon = True
+    token_refresh_thread.start()
     app.run(host='0.0.0.0', port=5000)
