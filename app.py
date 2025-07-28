@@ -4,14 +4,13 @@ import threading
 import time
 import json
 import os
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 app = Flask(__name__)
 
-ACCS_FILE = "accs.txt"  # ملف التوكنات الخارجي
+ACCS_FILE = "accs.txt"  # ملف الحسابات: JSON {"UID": "password", ...}
 
 tokens_groups = {
     'sv1': {}
@@ -27,7 +26,7 @@ def load_tokens():
                 data = json.load(f)
                 if isinstance(data, dict):
                     tokens_groups['sv1'] = data
-                    print(f"[INFO] Loaded {len(data)} tokens from {ACCS_FILE}")
+                    print(f"[INFO] Loaded {len(data)} accounts from {ACCS_FILE}")
                 else:
                     print(f"[ERROR] {ACCS_FILE} content is not a dict")
         except Exception as e:
@@ -39,40 +38,41 @@ def get_jwt_token(uid, password):
     url = f"https://jwt-gen-api-v2.onrender.com/token?uid={uid}&password={password}"
     try:
         response = requests.get(url, timeout=10)
-        print(f"[DEBUG] JWT API Response [{uid}]: {response.status_code} -> {response.text}")
         if response.status_code == 200:
             data = response.json()
             if data.get('status') in ('success', 'live'):
                 return data.get('token')
             else:
-                print(f"Failed to get JWT token for UID {uid}: status={data.get('status')}")
+                print(f"[WARN] JWT API failure for UID {uid}: status={data.get('status')}")
         else:
-            print(f"Failed to get JWT token for UID {uid}: HTTP {response.status_code}")
+            print(f"[WARN] JWT API HTTP error for UID {uid}: {response.status_code}")
     except Exception as e:
-        print(f"Error getting JWT token for UID {uid}: {e}")
+        print(f"[ERROR] Exception while getting JWT for UID {uid}: {e}")
     return None
 
 def refresh_tokens():
     while True:
-        for group_name, tokens in tokens_groups.items():
-            for uid, password in tokens.items():
-                token = get_jwt_token(uid, password)
-                if token:
-                    with jwt_tokens_lock:
-                        jwt_tokens[uid] = token
-        time.sleep(3600)
-
-def refresh_tokens_once():
-    for group_name, tokens in tokens_groups.items():
-        for uid, password in tokens.items():
+        print("[INFO] Refreshing JWT tokens for all accounts...")
+        for uid, password in tokens_groups['sv1'].items():
             token = get_jwt_token(uid, password)
             if token:
                 with jwt_tokens_lock:
                     jwt_tokens[uid] = token
+                print(f"[INFO] Token refreshed for UID {uid}")
+            else:
+                print(f"[WARN] Failed to refresh token for UID {uid}")
+        time.sleep(3600)
 
-token_refresh_thread = threading.Thread(target=refresh_tokens)
-token_refresh_thread.daemon = True
-token_refresh_thread.start()
+def refresh_tokens_once():
+    print("[INFO] Initial JWT tokens refresh at startup...")
+    for uid, password in tokens_groups['sv1'].items():
+        token = get_jwt_token(uid, password)
+        if token:
+            with jwt_tokens_lock:
+                jwt_tokens[uid] = token
+            print(f"[INFO] Token loaded for UID {uid}")
+        else:
+            print(f"[WARN] Failed to load token for UID {uid}")
 
 def FOX_RequestAddingFriend(token, target_id):
     url = "https://arifi-like-token.vercel.app/like"
@@ -87,12 +87,24 @@ def FOX_RequestAddingFriend(token, target_id):
         "X-GA": "v1 1",
         "ReleaseVersion": "OB49",
     }
-    response = requests.get(url, params=params, headers=headers)
-    return response
+    try:
+        response = requests.get(url, params=params, headers=headers)
+        return response
+    except Exception as e:
+        print(f"[ERROR] Failed to send like request: {e}")
+        return None
+
+@app.route('/')
+def home():
+    return "Server is running. استخدم /add_likes?uid=XXXX"
+
+@app.route('/tokens', methods=['GET'])
+def list_tokens():
+    with jwt_tokens_lock:
+        return jsonify(jwt_tokens)
 
 @app.route('/add_likes', methods=['GET'])
-@app.route('/sv<int:sv_number>/add_likes', methods=['GET'])
-def send_friend_requests(sv_number=None):
+def send_likes():
     target_id = request.args.get('uid')
     if not target_id:
         return jsonify({"error": "target_id is required"}), 400
@@ -102,21 +114,12 @@ def send_friend_requests(sv_number=None):
     except ValueError:
         return jsonify({"error": "target_id must be an integer"}), 400
 
-    if sv_number is not None:
-        group_name = f'sv{sv_number}'
-        if group_name in tokens_groups:
-            selected_tokens = list(tokens_groups[group_name].items())
-        else:
-            return jsonify({"error": f"Invalid group: {group_name}"}), 400
-    else:
-        selected_tokens = list(tokens_groups['sv1'].items())
-
     results = {}
-    for uid, password in selected_tokens:
+    for uid, password in tokens_groups['sv1'].items():
         with jwt_tokens_lock:
             token = jwt_tokens.get(uid)
         if not token:
-            # إذا التوكن غير موجود في الذاكرة نعيد طلبه (اختياري)
+            # طلب توكن جديد إذا غير موجود (اختياري)
             token = get_jwt_token(uid, password)
             if token:
                 with jwt_tokens_lock:
@@ -126,21 +129,24 @@ def send_friend_requests(sv_number=None):
                 continue
 
         res = FOX_RequestAddingFriend(token, target_id)
-        try:
-            content = res.json()
-        except Exception:
-            content = res.text
-
-        results[uid] = {
-            "ok": res.status_code == 200,
-            "status_code": res.status_code,
-            "content": content
-        }
+        if res:
+            try:
+                content = res.json()
+            except Exception:
+                content = res.text
+            results[uid] = {
+                "ok": res.status_code == 200,
+                "status_code": res.status_code,
+                "content": content
+            }
+        else:
+            results[uid] = {"ok": False, "error": "request_failed"}
 
     return jsonify({"message": "done", "results": results})
 
 if __name__ == "__main__":
     load_tokens()
     refresh_tokens_once()
+    threading.Thread(target=refresh_tokens, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
