@@ -135,7 +135,7 @@ async def run_add_likes_async(selected_tokens, target_id: int, n: int):
 @app.route('/sv<int:sv_number>/add_likes', methods=['GET'])
 def send_friend_requests(sv_number=None):
     target_id = request.args.get('uid')
-    n = int(request.args.get('n', 100))  # عدد العمليات الإجمالي (افتراضياً 100)
+    n = int(request.args.get('n', 100))  # عدد اللايكات المطلوبة
 
     if not target_id:
         return jsonify({"error": "target_id is required"}), 400
@@ -157,9 +157,41 @@ def send_friend_requests(sv_number=None):
     if not selected_tokens:
         return jsonify({"error": "no tokens available"}), 500
 
+    # أولاً نجلب معلومات اللاعب قبل اللايك
+    info_url = f"https://razor-info.vercel.app/player-info?uid={target_id}&region=me"
+    try:
+        info_resp = httpx.get(info_url, timeout=5)
+        info_data = info_resp.json()
+        basic_info = info_data.get("basicInfo", {})
+        player_name = basic_info.get("nickname", "unknown")
+        likes_before = int(basic_info.get("liked", 0))
+    except Exception as e:
+        print(f"Exception fetching player info: {e}")
+        player_name = "unknown"
+        likes_before = 0
+
+    # تشغيل اللايكات بشكل async
     result = asyncio.run(run_add_likes_async(selected_tokens, target_id, n))
-    return jsonify(result)
+
+    # حساب عدد اللايكات الناجحة (العمليات التي رجعت dict مع ok=True)
+    result = asyncio.run(run_add_likes_async(selected_tokens, target_id, n))
+
+    # عدد العمليات الناجحة
+    likes_added = sum(uid_result["success"] for uid_result in result.get("results", {}).values())
+
+    # اللايكات بعد الإضافة = اللايكات قبل + العمليات الناجحة
+    likes_after = likes_before + likes_added
+
+    response = {
+        "uid": target_id,
+        "player_name": player_name,
+        "likes_before": likes_before,
+        "likes_after": likes_after,
+        "likes_added": likes_added,
+    }
+
+    return jsonify(response)
+
 
 if __name__ == "__main__":
-    # شغّل Flask
     app.run(host='0.0.0.0', port=5000)
