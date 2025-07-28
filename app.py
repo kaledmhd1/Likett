@@ -207,7 +207,22 @@ def send_friend_requests(sv_number=None):
 
 if __name__ == "__main__":
     load_tokens()
+
+    # تحديث التوكنات مرة واحدة عند بدء التشغيل
+    print("[INFO] Performing initial JWT token refresh...")
+    for group_name, tokens in tokens_groups.items():
+        for uid, password in tokens.items():
+            token = get_jwt_token(uid, password)
+            if token:
+                with jwt_tokens_lock:
+                    jwt_tokens[uid] = token
+                    print(f"[INFO] Initial token acquired for UID {uid}")
+            else:
+                print(f"[WARN] Failed to acquire initial token for UID {uid}")
+
+    # بدء خيط التحديث الدوري للتوكنات
     token_refresh_thread = threading.Thread(target=refresh_tokens)
     token_refresh_thread.daemon = True
     token_refresh_thread.start()
+
     app.run(host='0.0.0.0', port=5000)
